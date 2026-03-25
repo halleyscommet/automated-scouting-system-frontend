@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { get } from "svelte/store";
   import { api } from "../api";
   import {
     step,
@@ -40,7 +41,19 @@
   // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
   onMount(async () => {
+    const savedRobot = get(robotModel);
+    const savedBall = get(ballModel);
+    const savedYear = get(selectedYear);
+    const savedEvent = get(selectedEvent);
+    const savedMatch = get(selectedMatch);
+
+    modelValue1 = savedRobot?.name ?? "";
+    modelValue2 = savedBall?.name ?? "";
+    yearValue = savedYear;
+
     await refreshModels();
+
+    await onYearChange(savedEvent?.key, savedMatch?.key);
   });
 
   async function refreshModels() {
@@ -53,23 +66,40 @@
 
   // ── Events ────────────────────────────────────────────────────────────────────
 
-  async function onYearChange() {
+  async function onYearChange(preferredEventKey?: string | Event, preferredMatchKey?: string) {
+    const preferredEvent = typeof preferredEventKey === "string" ? preferredEventKey : undefined;
     events = [];
     matches = [];
     eventKey = "";
     matchKey = "";
     loadingEvents = true;
     try {
-      events = await api.tba.events(yearValue);
-      selectedYear.set(yearValue);
+      events = await api.tba.events(Number(yearValue));
+      selectedYear.set(Number(yearValue));
+
+      if (events.length === 0) {
+        selectedEvent.set(null);
+        selectedMatch.set(null);
+        return;
+      }
+
+      const nextEvent = preferredEvent && events.some((e) => e.key === preferredEvent)
+        ? preferredEvent
+        : events[0].key;
+
+      eventKey = nextEvent;
+      await onEventChange(preferredMatchKey);
     } catch (e: any) {
       events = [];
+      selectedEvent.set(null);
+      selectedMatch.set(null);
     } finally {
       loadingEvents = false;
     }
   }
 
-  async function onEventChange() {
+  async function onEventChange(preferredMatchKey?: string | Event) {
+    const preferredMatch = typeof preferredMatchKey === "string" ? preferredMatchKey : undefined;
     matches = [];
     matchKey = "";
     if (!eventKey) return;
@@ -77,8 +107,21 @@
     try {
       matches = await api.tba.matches(eventKey);
       selectedEvent.set(events.find((e) => e.key === eventKey) ?? null);
+
+      if (matches.length === 0) {
+        selectedMatch.set(null);
+        return;
+      }
+
+      const nextMatch = preferredMatch && matches.some((m) => m.key === preferredMatch)
+        ? preferredMatch
+        : matches[0].key;
+
+      matchKey = nextMatch;
+      onMatchChange();
     } catch {
       matches = [];
+      selectedMatch.set(null);
     } finally {
       loadingMatches = false;
     }

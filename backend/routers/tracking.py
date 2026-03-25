@@ -72,6 +72,7 @@ async def tracking_status(job_id: str):
         "current_frame": job.get("current_frame"),
         "total_frames": job.get("total_frames"),
         "error": job.get("error"),
+        "result_id": job.get("result_id"),
     }
 
 

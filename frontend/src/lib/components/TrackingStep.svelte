@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { get } from "svelte/store";
   import { api } from "../api";
   import {
     step,
@@ -44,10 +45,48 @@
   // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
   onMount(async () => {
-    await launchTracking();
+    await resumeOrLaunchTracking();
   });
 
   onDestroy(() => ws?.close());
+
+  async function resumeOrLaunchTracking() {
+    const existingJobId = get(trackingJobId);
+    if (!existingJobId) {
+      await launchTracking();
+      return;
+    }
+
+    status = "Resuming previous tracking session…";
+    try {
+      const job = await api.tracking.status(existingJobId);
+      progress = job.progress;
+      currentFrame = job.current_frame;
+      totalFrames = job.total_frames;
+
+      if (job.status === "completed") {
+        status = "completed";
+        if (job.result_id) {
+          await loadResult(job.result_id);
+        } else {
+          error = "Tracking completed, but no result ID was found.";
+        }
+        return;
+      }
+
+      if (job.status === "failed") {
+        status = "failed";
+        error = job.error ?? "Tracking failed.";
+        return;
+      }
+
+      openWebSocket(existingJobId);
+    } catch {
+      // If the backend restarted and forgot the job, start fresh.
+      trackingJobId.set(null);
+      await launchTracking();
+    }
+  }
 
   async function launchTracking() {
     status = "Starting tracking job…";

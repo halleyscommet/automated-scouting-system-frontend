@@ -165,9 +165,20 @@ class TrackingService:
             # Frames each track_id has been absent
             frames_lost: dict[int, int] = {}
 
+            # Tracks temporarily snoozed after user chooses "drop/skip" in
+            # re-identification. Maps lost track_id -> frame index when
+            # re-identification prompts may resume for that track.
+            reidentify_snooze_until: dict[int, int] = {}
+
             # Per-team position history: team → [(cx, cy, frame_idx), ...]
             positions: dict[int, list[tuple[float, float, int]]] = {
                 r["team_number"]: [] for r in job["robots"]
+            }
+
+            # Most recent known bbox per team. Seed from initial annotations so
+            # re-identification prompts can show a "last seen" hint immediately.
+            last_known_bbox_by_team: dict[int, dict] = {
+                r["team_number"]: r["bbox"] for r in job["robots"]
             }
 
             # Scoring state
@@ -184,6 +195,15 @@ class TrackingService:
             # Each frame we try to match these against unassigned BoT-SORT detections.
             pending_reident: dict[int, dict] = {}
             REIDENT_HINT_TTL = 60  # try for up to 60 frames
+
+            # Initial annotation boxes should act as suggestions, not just a
+            # single-frame hard match. Keep unmatched annotations as hints for
+            # a short time so tracks that appear a few frames later can still
+            # be assigned to the intended teams.
+            pending_annotation_hints: dict[int, dict] = {
+                r["team_number"]: {"bbox": r["bbox"], "ttl": 180}
+                for r in job["robots"]
+            }
 
             frame_idx = job["first_frame"]
             first_frame_matched = False
@@ -226,6 +246,8 @@ class TrackingService:
                                 if best_team is not None:
                                     track_to_team[track_id] = best_team
                                     frames_lost.pop(track_id, None)
+                                    reidentify_snooze_until.pop(track_id, None)
+                                    pending_annotation_hints.pop(best_team, None)
 
                             if track_id in track_to_team:
                                 current_robots[track_id] = {
@@ -237,47 +259,36 @@ class TrackingService:
                                 team = track_to_team[track_id]
                                 positions[team].append((cx, cy, frame_idx))
 
-                # ── Match pending re-ID hints against unassigned detections ───
-                if pending_reident and boxes is not None:
-                    assigned_tids = set(track_to_team.keys())
-                    for box in boxes:
-                        if box.id is None:
-                            continue
-                        tid = int(box.id[0])
-                        if tid in assigned_tids:
-                            continue
-                        bcls = int(box.cls[0])
-                        if bcls != ROBOT_CLASS_ID:
-                            continue
-                        bx1, by1, bx2, by2 = box.xyxy[0].tolist()
-                        det_bbox = {"x1": bx1, "y1": by1, "x2": bx2, "y2": by2}
+                # ── Match pending bbox hints against unassigned detections ────
+                # Re-identification hints are explicit user input from a pause,
+                # so we use a stricter IoU threshold than startup suggestions.
+                self._assign_pending_bbox_hints(
+                    boxes=boxes,
+                    track_to_team=track_to_team,
+                    pending_hints=pending_reident,
+                    current_robots=current_robots,
+                    positions=positions,
+                    frame_idx=frame_idx,
+                    frames_lost=frames_lost,
+                    min_iou=0.2,
+                )
 
-                        best_team = None
-                        best_iou = 0.2  # minimum IoU threshold to accept
-                        for team_num, hint in list(pending_reident.items()):
-                            iou = _iou(det_bbox, hint["bbox"])
-                            if iou > best_iou:
-                                best_iou = iou
-                                best_team = team_num
+                # Initial annotation hints are weaker suggestions.
+                self._assign_pending_bbox_hints(
+                    boxes=boxes,
+                    track_to_team=track_to_team,
+                    pending_hints=pending_annotation_hints,
+                    current_robots=current_robots,
+                    positions=positions,
+                    frame_idx=frame_idx,
+                    frames_lost=frames_lost,
+                    min_iou=0.1,
+                )
 
-                        if best_team is not None:
-                            track_to_team[tid] = best_team
-                            frames_lost.pop(tid, None)
-                            current_robots[tid] = {
-                                "team": best_team,
-                                "bbox": det_bbox,
-                            }
-                            cx = (bx1 + bx2) / 2
-                            cy = (by1 + by2) / 2
-                            positions[best_team].append((cx, cy, frame_idx))
-                            current_track_ids.add(tid)
-                            del pending_reident[best_team]
-
-                    # Tick down TTL and expire stale hints
-                    for team_num in list(pending_reident.keys()):
-                        pending_reident[team_num]["ttl"] -= 1
-                        if pending_reident[team_num]["ttl"] <= 0:
-                            del pending_reident[team_num]
+                # Refresh each team's last known location from assigned robots
+                # visible on this frame.
+                for info in current_robots.values():
+                    last_known_bbox_by_team[info["team"]] = info["bbox"]
 
                 # Ball model (or fallback to robot model) detects balls
                 if ball_model:
@@ -312,6 +323,9 @@ class TrackingService:
                 for tid in list(known_tracks):
                     if tid not in current_track_ids:
                         frames_lost[tid] = frames_lost.get(tid, 0) + 1
+                        snooze_until = reidentify_snooze_until.get(tid)
+                        if snooze_until is not None and frame_idx < snooze_until:
+                            continue
                         if frames_lost[tid] >= REIDENTIFY_THRESHOLD_FRAMES:
                             # Pause and ask user – pass track_to_team by ref so it can be mutated
                             self._trigger_reidentify(
@@ -319,10 +333,13 @@ class TrackingService:
                                 tid, track_to_team[tid], team_alliance,
                                 current_robots, track_to_team,
                                 pending_reident, REIDENT_HINT_TTL,
+                                reidentify_snooze_until,
+                                last_known_bbox_by_team,
                             )
                             frames_lost.pop(tid, None)
                     else:
                         frames_lost[tid] = 0  # reset on re-detect
+                        reidentify_snooze_until.pop(tid, None)
 
                 # ── Scoring logic ─────────────────────────────────────────────
                 _scoring_svc.process_frame(
@@ -399,6 +416,8 @@ class TrackingService:
         track_to_team: dict[int, int],
         pending_reident: dict[int, dict],
         reident_hint_ttl: int,
+        reidentify_snooze_until: dict[int, int],
+        last_known_bbox_by_team: dict[int, dict],
     ) -> None:
         """Pause the tracker thread, send a reidentify event, and wait for the client."""
         _, buf = cv2.imencode(".jpg", frame)
@@ -427,11 +446,13 @@ class TrackingService:
             "frame_image": frame_b64,
             "frame_width": frame.shape[1],
             "frame_height": frame.shape[0],
+            "last_known_bbox": last_known_bbox_by_team.get(lost_team),
             "active_tracks": active,
         })
 
         # Block thread until user responds (5-minute timeout)
         responded = job["resume_event"].wait(timeout=300)
+        reidentify_snooze_until.pop(lost_tid, None)
 
         if responded and job["reidentify_response"]:
             resp = job["reidentify_response"]
@@ -452,8 +473,10 @@ class TrackingService:
                 track_to_team.pop(lost_tid, None)
                 track_to_team[new_tid] = lost_team
             elif new_tid is None:
-                # User chose to drop the track entirely
-                track_to_team.pop(lost_tid, None)
+                # User chose to temporarily skip this robot. Keep the mapping,
+                # but snooze re-identification prompts for one lost-threshold
+                # window instead of dropping the robot forever.
+                reidentify_snooze_until[lost_tid] = frame_idx + REIDENTIFY_THRESHOLD_FRAMES
 
         job["status"] = "running"
 
@@ -509,6 +532,68 @@ class TrackingService:
                 best_iou = iou
                 best_team = robot["team_number"]
         return best_team if best_iou > 0.1 else None
+
+    @staticmethod
+    def _assign_pending_bbox_hints(
+        boxes,
+        track_to_team: dict[int, int],
+        pending_hints: dict[int, dict],
+        current_robots: dict[int, dict],
+        positions: dict[int, list[tuple[float, float, int]]],
+        frame_idx: int,
+        frames_lost: dict[int, int],
+        min_iou: float,
+    ) -> None:
+        """Assign unclaimed robot detections to teams using pending bbox hints."""
+        if not pending_hints or boxes is None:
+            return
+
+        assigned_tids = set(track_to_team.keys())
+        assigned_teams = set(track_to_team.values())
+
+        for box in boxes:
+            if box.id is None:
+                continue
+            tid = int(box.id[0])
+            if tid in assigned_tids:
+                continue
+
+            bcls = int(box.cls[0])
+            if bcls != ROBOT_CLASS_ID:
+                continue
+
+            bx1, by1, bx2, by2 = box.xyxy[0].tolist()
+            det_bbox = {"x1": bx1, "y1": by1, "x2": bx2, "y2": by2}
+
+            best_team = None
+            best_iou = min_iou
+            for team_num, hint in list(pending_hints.items()):
+                if team_num in assigned_teams:
+                    continue
+                iou = _iou(det_bbox, hint["bbox"])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_team = team_num
+
+            if best_team is None:
+                continue
+
+            track_to_team[tid] = best_team
+            frames_lost.pop(tid, None)
+            current_robots[tid] = {"team": best_team, "bbox": det_bbox}
+            cx = (bx1 + bx2) / 2
+            cy = (by1 + by2) / 2
+            positions[best_team].append((cx, cy, frame_idx))
+
+            assigned_tids.add(tid)
+            assigned_teams.add(best_team)
+            del pending_hints[best_team]
+
+        # Tick down TTL and expire stale hints
+        for team_num in list(pending_hints.keys()):
+            pending_hints[team_num]["ttl"] -= 1
+            if pending_hints[team_num]["ttl"] <= 0:
+                del pending_hints[team_num]
 
 
 # ── Geometry helpers ──────────────────────────────────────────────────────────

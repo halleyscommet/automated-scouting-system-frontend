@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api } from "../api";
-  import { step, currentResult } from "../store";
+  import { currentResult, resetSessionState } from "../store";
   import type { TrackingResult, ResultSummary } from "../types";
 
   // ── State ─────────────────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@
       <button class="btn-secondary" on:click={() => (showPast = !showPast)}>
         {showPast ? "Hide" : "View Past Results"}
       </button>
-      <button class="btn-secondary" on:click={() => step.set("setup")}>New Session</button>
+      <button class="btn-secondary" on:click={resetSessionState}>New Session</button>
     </div>
   </div>
 

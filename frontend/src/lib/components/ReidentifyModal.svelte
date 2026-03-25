@@ -6,7 +6,7 @@
    * The user can:
    *  1. Click an existing tracked robot to re-assign it
    *  2. Draw a new bounding box for the lost robot
-   *  3. Drop the robot entirely
+    *  3. Temporarily skip this robot
    */
 
   import { onMount, tick } from "svelte";
@@ -43,16 +43,29 @@
 
   function resizeCanvas() {
     if (!canvasEl) return;
-    const maxW = canvasEl.parentElement!.clientWidth;
-    scale = maxW / event.frame_width;
-    canvasEl.width = event.frame_width * scale;
-    canvasEl.height = event.frame_height * scale;
+    // Render at native pixel resolution so jersey numbers remain readable.
+    scale = 1;
+    canvasEl.width = event.frame_width;
+    canvasEl.height = event.frame_height;
   }
 
   function render() {
     if (!ctx || !bgImage.complete) return;
     ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
     ctx.drawImage(bgImage, 0, 0, canvasEl.width, canvasEl.height);
+
+    // Draw last-known position hint for the lost team.
+    if (event.last_known_bbox) {
+      const { x1, y1, x2, y2 } = event.last_known_bbox;
+      ctx.strokeStyle = "#ffd84d";
+      ctx.lineWidth = 3;
+      ctx.setLineDash([10, 6]);
+      ctx.strokeRect(x1 * scale, y1 * scale, (x2 - x1) * scale, (y2 - y1) * scale);
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#ffd84d";
+      ctx.font = `bold ${Math.max(13, 16 * scale)}px sans-serif`;
+      ctx.fillText(`Last seen #${event.lost_team}`, x1 * scale + 3, y1 * scale + 15 * scale);
+    }
 
     // Draw existing tracked boxes
     for (const t of event.active_tracks) {
@@ -64,7 +77,7 @@
       ctx.strokeRect(x1 * scale, y1 * scale, (x2 - x1) * scale, (y2 - y1) * scale);
       // Label
       ctx.fillStyle = ctx.strokeStyle;
-      ctx.font = `bold ${Math.max(11, 13 * scale)}px sans-serif`;
+      ctx.font = `bold ${Math.max(13, 16 * scale)}px sans-serif`;
       ctx.fillText(`#${t.team_number}`, x1 * scale + 3, y1 * scale + 15 * scale);
       ctx.globalAlpha = 1;
     }
@@ -80,7 +93,7 @@
       ctx.fillStyle = "rgba(0,255,136,0.1)";
       ctx.fillRect(x1 * scale, y1 * scale, (x2 - x1) * scale, (y2 - y1) * scale);
       ctx.fillStyle = "#00ff88";
-      ctx.font = `bold ${Math.max(11, 13 * scale)}px sans-serif`;
+      ctx.font = `bold ${Math.max(13, 16 * scale)}px sans-serif`;
       ctx.fillText(`#${event.lost_team} (drawn)`, x1 * scale + 3, y1 * scale + 15 * scale);
     }
 
@@ -182,6 +195,9 @@
       Team <strong>#{event.lost_team}</strong>
       (<span class="alliance {event.lost_alliance}">{event.lost_alliance}</span>)
       was lost for too many frames. Select an existing track, or draw a box around it.
+      {#if event.last_known_bbox}
+        The yellow dashed box shows the last known position.
+      {/if}
     </p>
 
     <!-- Mode toolbar -->
@@ -230,7 +246,7 @@
         class:selected={chosen === -1}
         on:click={() => { chosen = -1; drawnBox = null; render(); }}
       >
-        Drop this robot (not visible)
+        Skip this robot for now
       </button>
     </div>
 
@@ -318,6 +334,9 @@
     overflow: hidden;
     border: 1px solid var(--border);
     line-height: 0;
+    max-height: 72vh;
+    overflow: auto;
+    background: #000;
   }
 
   canvas {

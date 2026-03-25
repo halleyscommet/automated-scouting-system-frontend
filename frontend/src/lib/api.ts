@@ -6,6 +6,7 @@ import type {
   HLSInfo,
   DownloadJob,
   DetectFrameResult,
+  TrackingJob,
   TrackingResult,
   ResultSummary,
 } from "./types";
@@ -94,6 +95,7 @@ export const api = {
       robots: unknown[];
       hub_zones: unknown[];
     }) => post<{ job_id: string }>("/tracking/start", body),
+    status: (jobId: string) => get<TrackingJob>(`/tracking/status/${jobId}`),
     wsUrl: (jobId: string) => `ws://localhost:8000/api/tracking/ws/${jobId}`,
   },
 

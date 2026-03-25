@@ -98,6 +98,7 @@ export interface TrackingJob {
   current_frame: number | null;
   total_frames: number | null;
   error: string | null;
+  result_id?: string | null;
 }
 
 export interface WsProgress {
@@ -135,6 +136,7 @@ export interface WsReidentify {
   frame_image: string; // base64 JPEG
   frame_width: number;
   frame_height: number;
+  last_known_bbox?: BBox | null;
   active_tracks: ActiveTrack[];
 }
 
