@@ -143,7 +143,7 @@
 
           {#if data.heatmap_url}
             <img
-              src={`http://localhost:8000${data.heatmap_url}`}
+              src={api.results.heatmapPathUrl(data.heatmap_url)}
               alt="Team {team} heatmap"
               class="heatmap-img"
             />

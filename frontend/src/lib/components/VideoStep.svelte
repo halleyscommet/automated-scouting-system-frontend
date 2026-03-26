@@ -51,10 +51,10 @@
     if (!videoEl) return;
     if (Hls.isSupported()) {
       hls = new Hls();
-      hls.loadSource(`http://localhost:8000${src}`);
+      hls.loadSource(api.video.hlsPlaybackUrl(src));
       hls.attachMedia(videoEl);
     } else if (videoEl.canPlayType("application/vnd.apple.mpegurl")) {
-      videoEl.src = `http://localhost:8000${src}`;
+      videoEl.src = api.video.hlsPlaybackUrl(src);
     }
   }
 

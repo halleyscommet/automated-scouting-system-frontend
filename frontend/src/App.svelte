@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { step } from "./lib/store";
+  import { getApiOrigin, setApiOrigin } from "./lib/api";
   import SetupStep from "./lib/components/SetupStep.svelte";
   import VideoStep from "./lib/components/VideoStep.svelte";
   import AnnotationCanvas from "./lib/components/AnnotationCanvas.svelte";
@@ -15,6 +17,28 @@
   ] as const;
 
   $: currentIndex = STEPS.findIndex((s) => s.id === $step);
+
+  let apiOriginInput = "";
+  let apiHint = "";
+
+  onMount(() => {
+    apiOriginInput = getApiOrigin();
+  });
+
+  function saveApiOrigin() {
+    try {
+      const saved = setApiOrigin(apiOriginInput);
+      apiOriginInput = saved;
+      apiHint = "Saved. New requests will use this API URL.";
+    } catch (err) {
+      apiHint = err instanceof Error ? err.message : "Invalid API URL";
+    }
+  }
+
+  function useLocalDefault() {
+    apiOriginInput = "http://localhost:8000";
+    saveApiOrigin();
+  }
 </script>
 
 <div class="app">
@@ -24,6 +48,24 @@
       <span class="logo-icon">👁</span>
       <span class="logo-text">Seer AI</span>
       <span class="logo-sub">FRC 2026 Tracker</span>
+    </div>
+
+    <div class="api-config">
+      <label for="api-origin" class="api-label">API URL</label>
+      <div class="api-row">
+        <input
+          id="api-origin"
+          type="url"
+          class="api-input"
+          bind:value={apiOriginInput}
+          placeholder="https://your-host:12345"
+        />
+        <button class="api-btn" on:click={saveApiOrigin}>Save</button>
+        <button class="api-btn ghost" on:click={useLocalDefault}>Local</button>
+      </div>
+      {#if apiHint}
+        <p class="api-hint">{apiHint}</p>
+      {/if}
     </div>
 
     <!-- Step breadcrumb -->
@@ -78,6 +120,61 @@
     align-items: center;
     gap: 2.5rem;
     flex-wrap: wrap;
+  }
+
+  .api-config {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: min(520px, 100%);
+    flex: 1;
+  }
+
+  .api-label {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+  }
+
+  .api-row {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+
+  .api-input {
+    flex: 1;
+    min-width: 260px;
+    border: 1px solid var(--border);
+    background: #0f1020;
+    color: var(--text);
+    border-radius: 6px;
+    padding: 0.45rem 0.55rem;
+    font-size: 0.85rem;
+  }
+
+  .api-btn {
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #03140a;
+    border-radius: 6px;
+    font-weight: 700;
+    padding: 0.4rem 0.7rem;
+    cursor: pointer;
+    font-size: 0.8rem;
+  }
+
+  .api-btn.ghost {
+    background: transparent;
+    color: var(--text);
+    border-color: var(--border);
+  }
+
+  .api-hint {
+    margin: 0;
+    font-size: 0.75rem;
+    color: var(--text-muted);
   }
 
   .logo {
@@ -182,6 +279,8 @@
   @media (max-width: 600px) {
     main { padding: 1rem; }
     header { padding: 0.6rem 1rem; gap: 1rem; }
+    .api-config { min-width: 100%; }
+    .api-input { min-width: 100%; }
   }
 </style>
 

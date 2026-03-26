@@ -11,10 +11,69 @@ import type {
   ResultSummary,
 } from "./types";
 
-const BASE = "http://localhost:8000/api";
+const DEFAULT_API_ORIGIN = "http://localhost:8000";
+const API_ORIGIN_KEY = "seer-api-origin-v1";
+
+function normalizeOrigin(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (!trimmed) return DEFAULT_API_ORIGIN;
+  if (!/^https?:\/\//i.test(trimmed)) {
+    throw new Error("API origin must start with http:// or https://");
+  }
+  try {
+    const url = new URL(trimmed);
+    return url.origin;
+  } catch {
+    throw new Error("Invalid API origin URL");
+  }
+}
+
+function readStoredOrigin(): string {
+  if (typeof localStorage === "undefined") return DEFAULT_API_ORIGIN;
+  const raw = localStorage.getItem(API_ORIGIN_KEY);
+  if (!raw) return DEFAULT_API_ORIGIN;
+  try {
+    return normalizeOrigin(raw);
+  } catch {
+    return DEFAULT_API_ORIGIN;
+  }
+}
+
+let apiOrigin = readStoredOrigin();
+
+export function getApiOrigin(): string {
+  return apiOrigin;
+}
+
+export function setApiOrigin(nextOrigin: string): string {
+  const normalized = normalizeOrigin(nextOrigin);
+  apiOrigin = normalized;
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem(API_ORIGIN_KEY, normalized);
+  }
+  return normalized;
+}
+
+function apiPath(path: string): string {
+  return `/api${path}`;
+}
+
+function apiUrl(path: string): string {
+  return `${apiOrigin}${apiPath(path)}`;
+}
+
+export function backendUrl(path: string): string {
+  return `${apiOrigin}${path}`;
+}
+
+function wsUrl(path: string): string {
+  const protocol = apiOrigin.startsWith("https://") ? "wss://" : "ws://";
+  const host = apiOrigin.replace(/^https?:\/\//, "");
+  return `${protocol}${host}${apiPath(path)}`;
+}
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
+  const res = await fetch(apiUrl(path));
   if (!res.ok) {
     const detail = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(detail.detail ?? res.statusText);
@@ -23,7 +82,7 @@ async function get<T>(path: string): Promise<T> {
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(apiUrl(path), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -43,7 +102,7 @@ export const api = {
     upload: async (file: File): Promise<ModelInfo> => {
       const form = new FormData();
       form.append("file", file);
-      const res = await fetch(`${BASE}/models/upload`, { method: "POST", body: form });
+      const res = await fetch(apiUrl("/models/upload"), { method: "POST", body: form });
       if (!res.ok) {
         const detail = await res.json().catch(() => ({ detail: res.statusText }));
         throw new Error(detail.detail ?? res.statusText);
@@ -51,7 +110,7 @@ export const api = {
       return res.json();
     },
     delete: (name: string) =>
-      fetch(`${BASE}/models/${encodeURIComponent(name)}`, { method: "DELETE" }),
+      fetch(apiUrl(`/models/${encodeURIComponent(name)}`), { method: "DELETE" }),
   },
 
   // ── TBA ─────────────────────────────────────────────────────────────────────
@@ -75,7 +134,8 @@ export const api = {
     info: (matchKey: string) => get<VideoInfo>(`/video/info/${matchKey}`),
     hls: (matchKey: string) => get<HLSInfo>(`/video/hls/${matchKey}`),
     frameUrl: (matchKey: string, frame: number) =>
-      `http://localhost:8000/api/video/frame/${matchKey}/${frame}`,
+      apiUrl(`/video/frame/${matchKey}/${frame}`),
+    hlsPlaybackUrl: (path: string) => backendUrl(path),
   },
 
   // ── Tracking ─────────────────────────────────────────────────────────────────
@@ -96,7 +156,7 @@ export const api = {
       hub_zones: unknown[];
     }) => post<{ job_id: string }>("/tracking/start", body),
     status: (jobId: string) => get<TrackingJob>(`/tracking/status/${jobId}`),
-    wsUrl: (jobId: string) => `ws://localhost:8000/api/tracking/ws/${jobId}`,
+    wsUrl: (jobId: string) => wsUrl(`/tracking/ws/${jobId}`),
   },
 
   // ── Results ──────────────────────────────────────────────────────────────────
@@ -105,8 +165,9 @@ export const api = {
     list: () => get<ResultSummary[]>("/results/"),
     get: (resultId: string) => get<TrackingResult>(`/results/${resultId}`),
     heatmapUrl: (resultId: string, team: number) =>
-      `http://localhost:8000/results-static/${resultId}/heatmap_${team}.png`,
+      backendUrl(`/results-static/${resultId}/heatmap_${team}.png`),
+    heatmapPathUrl: (heatmapPath: string) => backendUrl(heatmapPath),
     delete: (resultId: string) =>
-      fetch(`${BASE}/results/${encodeURIComponent(resultId)}`, { method: "DELETE" }),
+      fetch(apiUrl(`/results/${encodeURIComponent(resultId)}`), { method: "DELETE" }),
   },
 };
