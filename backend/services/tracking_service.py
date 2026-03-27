@@ -165,9 +165,9 @@ class TrackingService:
             # Frames each track_id has been absent
             frames_lost: dict[int, int] = {}
 
-            # Tracks temporarily snoozed after user chooses "drop/skip" in
-            # re-identification. Maps lost track_id -> frame index when
-            # re-identification prompts may resume for that track.
+            # Teams temporarily snoozed after user chooses "drop/skip" in
+            # re-identification. Maps team_number -> frame index when
+            # re-identification prompts may resume for that team.
             reidentify_snooze_until: dict[int, int] = {}
 
             # Per-team position history: team → [(cx, cy, frame_idx), ...]
@@ -179,6 +179,11 @@ class TrackingService:
             # re-identification prompts can show a "last seen" hint immediately.
             last_known_bbox_by_team: dict[int, dict] = {
                 r["team_number"]: r["bbox"] for r in job["robots"]
+            }
+
+            # Frame index where each team was last confidently visible.
+            team_last_seen_frame: dict[int, int] = {
+                team: job["first_frame"] for team in team_alliance.keys()
             }
 
             # Scoring state
@@ -246,7 +251,7 @@ class TrackingService:
                                 if best_team is not None:
                                     track_to_team[track_id] = best_team
                                     frames_lost.pop(track_id, None)
-                                    reidentify_snooze_until.pop(track_id, None)
+                                    reidentify_snooze_until.pop(best_team, None)
                                     pending_annotation_hints.pop(best_team, None)
 
                             if track_id in track_to_team:
@@ -287,8 +292,12 @@ class TrackingService:
 
                 # Refresh each team's last known location from assigned robots
                 # visible on this frame.
+                visible_teams: set[int] = set()
                 for info in current_robots.values():
-                    last_known_bbox_by_team[info["team"]] = info["bbox"]
+                    team = info["team"]
+                    visible_teams.add(team)
+                    last_known_bbox_by_team[team] = info["bbox"]
+                    team_last_seen_frame[team] = frame_idx
 
                 # Ball model (or fallback to robot model) detects balls
                 if ball_model:
@@ -320,26 +329,60 @@ class TrackingService:
 
                 # ── Detect lost tracks ────────────────────────────────────────
                 known_tracks = set(track_to_team.keys())
+                prompted_teams: set[int] = set()
                 for tid in list(known_tracks):
                     if tid not in current_track_ids:
                         frames_lost[tid] = frames_lost.get(tid, 0) + 1
-                        snooze_until = reidentify_snooze_until.get(tid)
+                        lost_team = track_to_team.get(tid)
+                        if lost_team is None:
+                            continue
+                        if lost_team in prompted_teams:
+                            continue
+                        snooze_until = reidentify_snooze_until.get(lost_team)
                         if snooze_until is not None and frame_idx < snooze_until:
                             continue
                         if frames_lost[tid] >= REIDENTIFY_THRESHOLD_FRAMES:
                             # Pause and ask user – pass track_to_team by ref so it can be mutated
                             self._trigger_reidentify(
                                 job_id, job, loop, emit, frame, frame_idx,
-                                tid, track_to_team[tid], team_alliance,
+                                tid, lost_team, team_alliance,
                                 current_robots, track_to_team,
                                 pending_reident, REIDENT_HINT_TTL,
                                 reidentify_snooze_until,
                                 last_known_bbox_by_team,
                             )
+                            prompted_teams.add(lost_team)
                             frames_lost.pop(tid, None)
                     else:
                         frames_lost[tid] = 0  # reset on re-detect
-                        reidentify_snooze_until.pop(tid, None)
+                        mapped_team = track_to_team.get(tid)
+                        if mapped_team is not None:
+                            reidentify_snooze_until.pop(mapped_team, None)
+
+                # Team-level fallback: if a team has been absent long enough,
+                # request re-identification even when no specific track_id was lost
+                # (common during ID swaps while robots cross).
+                for team in team_alliance.keys():
+                    if team in visible_teams or team in pending_reident or team in prompted_teams:
+                        continue
+                    snooze_until = reidentify_snooze_until.get(team)
+                    if snooze_until is not None and frame_idx < snooze_until:
+                        continue
+                    last_seen = team_last_seen_frame.get(team, job["first_frame"])
+                    if frame_idx - last_seen < REIDENTIFY_THRESHOLD_FRAMES:
+                        continue
+
+                    mapped_tid = next((tid for tid, t in track_to_team.items() if t == team), None)
+                    self._trigger_reidentify(
+                        job_id, job, loop, emit, frame, frame_idx,
+                        mapped_tid, team, team_alliance,
+                        current_robots, track_to_team,
+                        pending_reident, REIDENT_HINT_TTL,
+                        reidentify_snooze_until,
+                        last_known_bbox_by_team,
+                    )
+                    prompted_teams.add(team)
+                    team_last_seen_frame[team] = frame_idx
 
                 # ── Scoring logic ─────────────────────────────────────────────
                 _scoring_svc.process_frame(
@@ -409,7 +452,7 @@ class TrackingService:
         emit,
         frame,
         frame_idx: int,
-        lost_tid: int,
+        lost_tid: Optional[int],
         lost_team: int,
         team_alliance: dict[int, str],
         current_robots: dict[int, dict],
@@ -452,7 +495,7 @@ class TrackingService:
 
         # Block thread until user responds (5-minute timeout)
         responded = job["resume_event"].wait(timeout=300)
-        reidentify_snooze_until.pop(lost_tid, None)
+        reidentify_snooze_until.pop(lost_team, None)
 
         if responded and job["reidentify_response"]:
             resp = job["reidentify_response"]
@@ -463,20 +506,28 @@ class TrackingService:
                 # User drew a bounding box for the lost robot.
                 # Store as a pending hint — we'll match it against real
                 # BoT-SORT detections on upcoming frames.
-                track_to_team.pop(lost_tid, None)
+                if lost_tid is not None:
+                    track_to_team.pop(lost_tid, None)
+                for tid, team in list(track_to_team.items()):
+                    if team == lost_team:
+                        del track_to_team[tid]
                 pending_reident[lost_team] = {
                     "bbox": drawn_bbox,
                     "ttl": reident_hint_ttl,
                 }
-            elif new_tid is not None and new_tid != lost_tid:
-                # Remove old (now-lost) track, map the newly selected track to the team
-                track_to_team.pop(lost_tid, None)
+            elif new_tid is not None:
+                # Replace any old mapping for this team with the selected track.
+                if lost_tid is not None and lost_tid != new_tid:
+                    track_to_team.pop(lost_tid, None)
+                for tid, team in list(track_to_team.items()):
+                    if team == lost_team and tid != new_tid:
+                        del track_to_team[tid]
                 track_to_team[new_tid] = lost_team
             elif new_tid is None:
                 # User chose to temporarily skip this robot. Keep the mapping,
                 # but snooze re-identification prompts for one lost-threshold
                 # window instead of dropping the robot forever.
-                reidentify_snooze_until[lost_tid] = frame_idx + REIDENTIFY_THRESHOLD_FRAMES
+                reidentify_snooze_until[lost_team] = frame_idx + REIDENTIFY_THRESHOLD_FRAMES
 
         job["status"] = "running"
 
